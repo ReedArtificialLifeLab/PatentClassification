@@ -1,1 +1,4 @@
+*/*.DS_Store
+
 10k-pruning/csv/
+worm-tagging/data/
