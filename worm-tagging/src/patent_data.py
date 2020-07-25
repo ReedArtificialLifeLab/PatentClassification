@@ -4,6 +4,8 @@ from tqdm import tqdm
 
 import re
 import math
+import numpy as np
+np.random.seed(1234567890)
 
 
 #
@@ -21,8 +23,17 @@ centroidsinv_path = data_dir + "centroids_inv.json"
 worms_path        = data_dir + "worms.json"
 
 patentsraw_path   = data_dir + "patents_raw.csv"
+patents_path      = data_dir + "patents.json"
 superdocs_path    = data_dir + "superdocs.json"
-tfidf_path        = data_dir + "tfidf.json"
+
+tfidf_dir         = data_dir + "tfidf/"
+tfidf_path        = lambda worm_id: tfidf_dir + str(worm_id) + ".json"
+
+tfidfbest_dir     = data_dir + "tfidf_best/"
+tfidfbest_path    = lambda worm_id: tfidfbest_dir + str(worm_id) + ".json"
+
+
+superdocs_sample_path = data_dir + "superdocs_sample.json"
 
 
 #
@@ -31,8 +42,8 @@ tfidf_path        = data_dir + "tfidf.json"
 
 
 def convert_clusterdocs_to_centroids():
-    with open(clusterdocs_path, "r+") as clusterdocs_csv:
-        clusterdocs_reader = csv.reader(clusterdocs_csv, delimiter=",")
+    with open(clusterdocs_path, "r+") as clusterdocs_file:
+        clusterdocs_reader = csv.reader(clusterdocs_file, delimiter=",")
 
         # get centroid_ids
         for centroid_ids in clusterdocs_reader:
@@ -48,8 +59,8 @@ def convert_clusterdocs_to_centroids():
                 centroids[centroid_ids[centroid_index]].append(int(patent_id))
 
 
-        with open(centroids_path, "w+") as centroids_json:
-            json.dump(centroids, centroids_json)
+        with open(centroids_path, "w+") as centroids_file:
+            json.dump(centroids, centroids_file)
 
             
 #
@@ -58,8 +69,8 @@ def convert_clusterdocs_to_centroids():
 
 
 def convert_localthreads_worms():
-    with open(localthreads_path, "r+") as localthreads_csv:
-        localthreads_reader = csv.reader(localthreads_csv, delimiter=",")
+    with open(localthreads_path, "r+") as localthreads_file:
+        localthreads_reader = csv.reader(localthreads_file, delimiter=",")
 
         worms = {}
 
@@ -73,8 +84,8 @@ def convert_localthreads_worms():
                 if centroid_id ]
             worms[worm_id] = centroid_ids
 
-        with open(worms_path, "w+") as worms_json:
-            json.dump(worms, worms_json)
+        with open(worms_path, "w+") as worms_file:
+            json.dump(worms, worms_file)
 
 
 #
@@ -85,8 +96,8 @@ def convert_localthreads_worms():
 # centroids : centroid_id => list<patent_id>
 def load_centroids():
     print("[*] loading centroids...")
-    with open(centroids_path, "r+") as centroids_json:
-        return json.load(centroids_json)
+    with open(centroids_path, "r+") as centroids_file:
+        return json.load(centroids_file)
 
             
 #
@@ -113,15 +124,15 @@ def calculate_centroidsinv():
 
 # centroidsinv : patent_id => list<centroid_id>
 def load_centroidsinv():
-    with open(centroidsinv_path, "r+") as centroidsinv_json:
-        return json.load(centroidsinv_json)
+    with open(centroidsinv_path, "r+") as centroidsinv_file:
+        return json.load(centroidsinv_file)
 
 
 def save_centroidsinv(centroidsinv=None):
     if centroidsinv is None:
         centroidsinv = calculate_centroidsinv()
-    with open(centroidsinv_path, "w+") as centroidsinv_json:
-        json.dump(centroidsinv, centroidsinv_json)
+    with open(centroidsinv_path, "w+") as centroidsinv_file:
+        json.dump(centroidsinv, centroidsinv_file)
 
 
 #
@@ -132,8 +143,40 @@ def save_centroidsinv(centroidsinv=None):
 # worms : worm_id => list<centroid_id>
 def load_worms():
     print("[*] loading worms...")
-    with open(worms_path, "r+") as worms_json:
-        return json.load(worms_json)
+    with open(worms_path, "r+") as worms_file:
+        return json.load(worms_file)
+        
+
+#
+# patents
+#
+
+# patentsraw : csv<patent_id, patent_text>
+def load_patentsraw():
+    print("[*] loading patents_raw...")
+    return csv.reader(open(patentsraw_path, "r+"), delimiter=",")
+
+
+# patents : patent_id => patent_text
+def calculate_patents():
+    print("[*] calculating patents...")
+    patentsraw = load_patentsraw()
+    patents = {}
+    for row in tqdm(patentsraw):
+        patents[int(row[0])] = row[1]
+    return patents
+
+def load_patents():
+    print("[*] loading patents...")
+    with open(patents_path, "r+") as patents_file:
+        return json.load(patents_file)
+
+def save_patents(patents=None):
+    if patents is None:
+        patents = calculate_patents()
+    print("[*] saving patents...")
+    with open(patents_path, "w+") as patents_file:
+        json.dump(patents, patents_file)
         
     
 #
@@ -143,75 +186,127 @@ def load_worms():
 #   the patents in the superdoc's worm
 #
 
+superdoc_config = {
+    "size": 50
+}
 
 # superdocs : worm_id => superdoc
 def calculate_superdocs():
-    print("[*] loading superdocs...")
-    patentsraw = load_patentsraw()
-    centroidsinv = load_centroidsinv()
+    patents   = load_patents()
+    centroids = load_centroids()
+    print("[*] calculating superdocs...")
 
-    # print("centroidsinv =", list(centroidsinv.items())[:10])
+    superdocs = {} # worm_id => superdoc_text
 
-    superdocs = {} # worm_id => superdoc
+    # centroids that were are small
+    # (i.e. smaller than superdoc_config.size
+    centroid_ids_omitted = []
 
-    missing_patent_ids = []
+    # patent_ids that were in centroids dict but not patents dict
+    patent_ids_missing = []
 
-    take = 10 # TEST
-
-    for row in tqdm(patentsraw):
-        if take is not None:
-            if take <= 0:
-                break
-            else:
-                take -= 1
-        
-        patent_id = int(row[0])
-        patent_text = row[1]
-
-        if str(patent_id) not in centroidsinv:
-            missing_patent_ids.append(patent_id)
+    # for each worm, take a random sample of patent_ids
+    for centroid_id, patent_ids in tqdm(centroids.items()):
+        centroid_id = int(centroid_id)
+        # centroid is too small
+        if len(patent_ids) < superdoc_config["size"]:
+            centroid_ids_omitted.append(centroid_id)
             continue
 
-        worm_ids = centroidsinv[str(patent_id)]
-        for worm_id in worm_ids:
-            if worm_id in superdocs:
-                superdocs[worm_id] += " " + patent_text
-            else:
-                superdocs[worm_id] = patent_text
+        superdoc_patent_ids = np.random.choice(patent_ids, size=superdoc_config["size"])
 
-    print("len(missing_patent_ids) =", len(missing_patent_ids))
-    # print("missing_patent_ids", missing_patent_ids) # DEBUG
+        superdoc_text = ""
+        for patent_id in superdoc_patent_ids:
+            patent_id = str(patent_id)
+            if patent_id not in patents:
+                patent_ids_missing.append(patent_id)
+                continue
+            superdoc_text += " " + patents[patent_id]
+
+        superdocs[centroid_id] = superdoc_text
+
+    print("[*] len(centroid_ids_omitted) =", len(centroid_ids_omitted))
+    print("[*] len(patent_ids_missing)   =", len(patent_ids_missing))
 
     return superdocs
-
-
-# patentsraw : csv<patent_id, patent_text>
-def load_patentsraw():
-    print("[*] loading patents_raw...")
-    return csv.reader(open(patentsraw_path, "r+"), delimiter=",")
 
 
 # superdocs : worm_id => superdoc
 def load_superdocs():
     print("[*] loading superdocs...")
-    with open(superdocs_path, "r+") as superdocs_json:
-        return json.load(superdocs_json)
+    with open(superdocs_path, "r+") as superdocs_file:
+        return json.load(superdocs_file)
 
 def save_superdocs(superdocs=None):
     if superdocs is None:
         superdocs = calculate_superdocs()
-    with open(superdocs_path, "w+") as superdocs_json:
-        json.dump(superdocs, superdocs_json)
+    with open(superdocs_path, "w+") as superdocs_file:
+        json.dump(superdocs, superdocs_file)
 
+
+# only works with the first 10 centroids
+def calculate_superdocs_sample():
+    patents   = load_patents()
+    centroids = load_centroids()
+    print("[*] calculating superdocs...")
+
+    superdocs = {} # worm_id => superdoc_text
+
+    # centroids that were are small
+    # (i.e. smaller than superdoc_config.size
+    centroid_ids_omitted = []
+
+    # patent_ids that were in centroids dict but not patents dict
+    patent_ids_missing = []
+
+    # for each worm, take a random sample of patent_ids
+    for centroid_id, patent_ids in tqdm(list(centroids.items())[:10]):
+        centroid_id = int(centroid_id)
+        # centroid is too small
+        if len(patent_ids) < superdoc_config["size"]:
+            centroid_ids_omitted.append(centroid_id)
+            continue
+
+        superdoc_patent_ids = np.random.choice(patent_ids, size=superdoc_config["size"])
+
+        superdoc_text = ""
+        for patent_id in superdoc_patent_ids:
+            patent_id = str(patent_id)
+            if patent_id not in patents:
+                patent_ids_missing.append(patent_id)
+                continue
+            superdoc_text += " " + patents[patent_id]
+
+        superdocs[centroid_id] = superdoc_text
+
+    print("[*] len(centroid_ids_omitted) =", len(centroid_ids_omitted))
+    print("[*] len(patent_ids_missing)   =", len(patent_ids_missing))
+
+    return superdocs
         
+        
+def save_superdocs_sample():
+    superdocs_sample = calculate_superdocs_sample()
+    print("[*] saving superdocs sample...")
+    with open(superdocs_sample_path, "w+") as superdocs_sample_file:
+        json.dump(superdocs_sample, superdocs_sample_file)
+
+def load_superdocs_sample():
+    print("[*] loading superdocs sample...")
+    with open(superdocs_sample_path, "r+") as superdocs_sample_file:
+        return json.load(superdocs_sample_file)
+
+    
 #
 # tfidf
 #
 
 
-def calculate_tfidf():
-    print("calculating tfidf_dict...")
+def calculate_tfidf_all():
     superdocs = load_superdocs()
+    # superdocs = load_superdocs_sample() # TEST
+
+    print("[*] calculating tfidf for all worms...")
 
     tf_dict = {} # worm_id => term => term frequency (tf)
     dc_dict = {} # term    => document count
@@ -242,31 +337,56 @@ def calculate_tfidf():
         for term in terms:
             tf_dict[worm_id][term] = tc_dict[term] / term_count
 
-    tfidf_dict = {} # worm_id => term => tfidf
+    tfidf_all_dict = {} # worm_id => term => tfidf
 
     # calculate idf and tfidf for each term in corpus relative to each doc in corpus
-    for worm_id in map(int, superdocs.keys()):
-        tfidf_dict[int(worm_id)] = {}
+    for worm_id in superdocs.keys():
+        worm_id = int(worm_id)
+        tfidf_all_dict[worm_id] = {}
         for term, dc in dc_dict.items():
             if term in tf_dict[worm_id]:
                 tf = tf_dict[worm_id][term]
                 idf = n_docs / dc
                 if 0.5 < idf and idf < 2:
                     tfidf = tf * math.log(idf)
-                    tfidf_dict[worm_id][term] = tfidf
+                    tfidf_all_dict[worm_id][term] = tfidf
             
-
-    return tfidf_dict
+    return tfidf_all_dict
 
 
 # tfidf : worm_id => term => tfidf
-def load_tfidf():
-    with open(tfidf_path, "r+") as tfidf_json:
-       return json.load(tfidf_json)
+def load_tfidf(worm_id):
+    print("[*] loading tfidf for worm_id="+str(worm_id)+"...")
+    with open(tfidf_path(worm_id), "r+") as tfidf_file:
+       return json.load(tfidf_file)
 
-def save_tfidf(tfidf=None):
-    if tfidf is None:
-        tfidf = calculate_tfidf()
-    with open(tfidf_path, "w+") as tfidf_json:
-        json.dump(tfidf, tfidf_json)
+def save_tfidf(worm_id, tfidf):
+    with open(tfidf_path(worm_id), "w+") as tfidf_file:
+        json.dump(tfidf, tfidf_file)
+   
+def save_tfidf_all(tfidf_all=None):
+    print("[*] saving tfidf for all worms...")
+    if tfidf_all is None:
+        tfidf_all = calculate_tfidf_all()
+    for worm_id, tfidf in tfidf_all.items():
+        save_tfidf(worm_id, tdidf)
 
+            
+#
+# tfidf best
+#
+
+
+def save_tfidfbest_all():
+    worms = load_worms()
+    # worms = load_superdocs_sample() # TEST
+
+    print("[*] calculating tfidf_best for all worms...")
+
+    for worm_id in worms.keys():
+        worm_id = int(worm_id)
+        tfidf = load_tfidf(worm_id)
+        tfidfbest = list(sorted(tfidf.items(), key=lambda x: x[1], reverse=True))[:50]
+        with open(tfidfbest_path(worm_id), "w+") as tfidfbest_file:
+            json.dump(tfidfbest, tfidfbest_file)
+        
