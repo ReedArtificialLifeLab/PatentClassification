@@ -1,3 +1,0 @@
-import patent_data
-
-
