@@ -27,7 +27,8 @@ if __name__ == "__main__":
 
 
     # tfidf_best
-    patent_data.save_tfidfbest_all()
+    # patent_data.save_tfidfbest_all()
+    patent_data.save_tfidfbest_all_csv()
 
 
 
